@@ -12,7 +12,8 @@ from chromadb.telemetry.opentelemetry import (
     trace_method,
 )
 from chromadb.types import (
-    EmbeddingRecord,
+    LogRecord,
+    RequestVersionContext,
     VectorEmbeddingRecord,
     VectorQuery,
     VectorQueryResult,
@@ -26,6 +27,7 @@ from chromadb.errors import InvalidDimensionException
 import hnswlib
 from chromadb.utils.read_write_lock import ReadWriteLock, ReadRWLock, WriteRWLock
 import logging
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +37,8 @@ DEFAULT_CAPACITY = 1000
 class LocalHnswSegment(VectorReader):
     _id: UUID
     _consumer: Consumer
-    _topic: Optional[str]
-    _subscription: UUID
+    _collection: Optional[UUID]
+    _subscription: Optional[UUID]
     _settings: Settings
     _params: HnswParams
 
@@ -49,6 +51,9 @@ class LocalHnswSegment(VectorReader):
 
     _id_to_label: Dict[str, int]
     _label_to_id: Dict[int, str]
+    # Note: As of the time of writing, this mapping is no longer needed.
+    # We merely keep it around for easy compatibility with the old code and
+    # debugging purposes.
     _id_to_seq_id: Dict[str, SeqId]
 
     _opentelemtry_client: OpenTelemetryClient
@@ -56,7 +61,8 @@ class LocalHnswSegment(VectorReader):
     def __init__(self, system: System, segment: Segment):
         self._consumer = system.instance(Consumer)
         self._id = segment["id"]
-        self._topic = segment["topic"]
+        self._collection = segment["collection"]
+        self._subscription = None
         self._settings = system.settings
         self._params = HnswParams(segment["metadata"] or {})
 
@@ -71,7 +77,6 @@ class LocalHnswSegment(VectorReader):
 
         self._lock = ReadWriteLock()
         self._opentelemtry_client = system.require(OpenTelemetryClient)
-        super().__init__(system, segment)
 
     @staticmethod
     @override
@@ -84,10 +89,10 @@ class LocalHnswSegment(VectorReader):
     @override
     def start(self) -> None:
         super().start()
-        if self._topic:
+        if self._collection:
             seq_id = self.max_seqid()
             self._subscription = self._consumer.subscribe(
-                self._topic, self._write_records, start=seq_id
+                self._collection, self._write_records, start=seq_id
             )
 
     @trace_method("LocalHnswSegment.stop", OpenTelemetryGranularity.ALL)
@@ -100,7 +105,9 @@ class LocalHnswSegment(VectorReader):
     @trace_method("LocalHnswSegment.get_vectors", OpenTelemetryGranularity.ALL)
     @override
     def get_vectors(
-        self, ids: Optional[Sequence[str]] = None
+        self,
+        request_version_context: RequestVersionContext,
+        ids: Optional[Sequence[str]] = None,
     ) -> Sequence[VectorEmbeddingRecord]:
         if ids is None:
             labels = list(self._label_to_id.keys())
@@ -112,14 +119,13 @@ class LocalHnswSegment(VectorReader):
 
         results = []
         if self._index is not None:
-            vectors = cast(Sequence[Vector], self._index.get_items(labels))
+            vectors = cast(
+                Sequence[Vector], np.array(self._index.get_items(labels))
+            )  # version 0.8 of hnswlib allows return_type="numpy"
 
             for label, vector in zip(labels, vectors):
                 id = self._label_to_id[label]
-                seq_id = self._id_to_seq_id[id]
-                results.append(
-                    VectorEmbeddingRecord(id=id, seq_id=seq_id, embedding=vector)
-                )
+                results.append(VectorEmbeddingRecord(id=id, embedding=vector))
 
         return results
 
@@ -154,7 +160,9 @@ class LocalHnswSegment(VectorReader):
 
         with ReadRWLock(self._lock):
             result_labels, distances = self._index.knn_query(
-                query_vectors, k=k, filter=filter_function if ids else None
+                np.array(query_vectors, dtype=np.float32),
+                k=k,
+                filter=filter_function if ids else None,
             )
 
             # TODO: these casts are not correct, hnswlib returns np
@@ -168,15 +176,15 @@ class LocalHnswSegment(VectorReader):
                     result_labels[result_i], distances[result_i]
                 ):
                     id = self._label_to_id[label]
-                    seq_id = self._id_to_seq_id[id]
                     if query["include_embeddings"]:
-                        embedding = self._index.get_items([label])[0]
+                        embedding = np.array(
+                            self._index.get_items([label])[0]
+                        )  # version 0.8 of hnswlib allows return_type="numpy"
                     else:
                         embedding = None
                     results.append(
                         VectorQueryResult(
                             id=id,
-                            seq_id=seq_id,
                             distance=distance.item(),
                             embedding=embedding,
                         )
@@ -190,7 +198,7 @@ class LocalHnswSegment(VectorReader):
         return self._max_seq_id
 
     @override
-    def count(self) -> int:
+    def count(self, request_version_context: RequestVersionContext) -> int:
         return len(self._id_to_label)
 
     @trace_method("LocalHnswSegment._init_index", OpenTelemetryGranularity.ALL)
@@ -272,18 +280,15 @@ class LocalHnswSegment(VectorReader):
 
             # If that succeeds, update the mappings
             for i, id in enumerate(written_ids):
-                self._id_to_seq_id[id] = batch.get_record(id)["seq_id"]
+                self._id_to_seq_id[id] = batch.get_record(id)["log_offset"]
                 self._id_to_label[id] = labels_to_write[i]
                 self._label_to_id[labels_to_write[i]] = id
 
             # If that succeeds, update the total count
             self._total_elements_added += batch.add_count
 
-            # If that succeeds, finally the seq ID
-            self._max_seq_id = batch.max_seq_id
-
     @trace_method("LocalHnswSegment._write_records", OpenTelemetryGranularity.ALL)
-    def _write_records(self, records: Sequence[EmbeddingRecord]) -> None:
+    def _write_records(self, records: Sequence[LogRecord]) -> None:
         """Add a batch of embeddings to the index"""
         if not self._running:
             raise RuntimeError("Cannot add embeddings to stopped component")
@@ -293,9 +298,9 @@ class LocalHnswSegment(VectorReader):
             batch = Batch()
 
             for record in records:
-                self._max_seq_id = max(self._max_seq_id, record["seq_id"])
-                id = record["id"]
-                op = record["operation"]
+                self._max_seq_id = max(self._max_seq_id, record["log_offset"])
+                id = record["record"]["id"]
+                op = record["record"]["operation"]
                 label = self._id_to_label.get(id, None)
 
                 if op == Operation.DELETE:
@@ -305,12 +310,12 @@ class LocalHnswSegment(VectorReader):
                         logger.warning(f"Delete of nonexisting embedding ID: {id}")
 
                 elif op == Operation.UPDATE:
-                    if record["embedding"] is not None:
+                    if record["record"]["embedding"] is not None:
                         if label is not None:
                             batch.apply(record)
                         else:
                             logger.warning(
-                                f"Update of nonexisting embedding ID: {record['id']}"
+                                f"Update of nonexisting embedding ID: {record['record']['id']}"
                             )
                 elif op == Operation.ADD:
                     if not label:

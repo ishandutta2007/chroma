@@ -1,12 +1,14 @@
 import argparse
 import os
-from typing import List, Dict
+from typing import List
 
-import openai
+from dotenv import load_dotenv
+from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 import chromadb
 
 
-def build_prompt(query: str, context: List[str]) -> List[Dict[str, str]]:
+def build_prompt(query: str, context: List[str]) -> List[ChatCompletionMessageParam]:
     """
     Builds a prompt for the LLM. #
 
@@ -21,10 +23,10 @@ def build_prompt(query: str, context: List[str]) -> List[Dict[str, str]]:
     context (List[str]): The context of the query, returned by embedding search.
 
     Returns:
-    A prompt for the LLM (List[Dict[str, str]]).
+    A prompt for the LLM (List[ChatCompletionMessageParam]).
     """
 
-    system = {
+    system: ChatCompletionMessageParam = {
         "role": "system",
         "content": "I am going to ask you a question, which I would like you to answer"
         "based only on the provided context, and not any other information."
@@ -32,7 +34,7 @@ def build_prompt(query: str, context: List[str]) -> List[Dict[str, str]]:
         'say "I am not sure", then try to make a guess.'
         "Break your answer up into nicely readable paragraphs.",
     }
-    user = {
+    user: ChatCompletionMessageParam = {
         "role": "user",
         "content": f"The question is {query}. Here is all the context you have:"
         f'{(" ").join(context)}',
@@ -41,7 +43,7 @@ def build_prompt(query: str, context: List[str]) -> List[Dict[str, str]]:
     return [system, user]
 
 
-def get_chatGPT_response(query: str, context: List[str]) -> str:
+def get_chatGPT_response(query: str, context: List[str], model_name: str) -> str:
     """
     Queries the GPT API to get a response to the question.
 
@@ -52,9 +54,9 @@ def get_chatGPT_response(query: str, context: List[str]) -> str:
     Returns:
     A response to the question.
     """
-
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
+    client = OpenAI()
+    response = client.chat.completions.create(
+        model=model_name,
         messages=build_prompt(query, context),
     )
 
@@ -64,11 +66,20 @@ def get_chatGPT_response(query: str, context: List[str]) -> str:
 def main(
     collection_name: str = "documents_collection", persist_directory: str = "."
 ) -> None:
-    # Check if the OPENAI_API_KEY environment variable is set. Prompt the user to set it if not.
-    if "OPENAI_API_KEY" not in os.environ:
-        openai.api_key = input(
+    load_dotenv()
+
+    # Check if the OPENAI_API_KEY environment variable is set.
+    if not os.getenv("OPENAI_API_KEY"):
+        print(
             "Please enter your OpenAI API Key. You can get it from https://platform.openai.com/account/api-keys\n"
         )
+        return
+
+    # Ask what model to use
+    model_name = "gpt-4o-mini"
+    change_model = input(f"This program is using the GPT-4o-mini model. Do you want to use a different model? (y/n): ")
+    if change_model == "y":
+        model_name = input("Please enter your desired model: ")
 
     # Instantiate a persistent chroma client in the persist_directory.
     # This will automatically load any previously saved collections.
@@ -85,7 +96,7 @@ def main(
         if len(query) == 0:
             print("Please enter a question. Ctrl+C to Quit.\n")
             continue
-        print("\nThinking...\n")
+        print(f"\nThinking using {model_name}...\n")
 
         # Query the collection to get the 5 most relevant results
         results = collection.query(
@@ -100,7 +111,7 @@ def main(
         )
 
         # Get the response from GPT
-        response = get_chatGPT_response(query, results["documents"][0])  # type: ignore
+        response = get_chatGPT_response(query, results["documents"][0], model_name)  # type: ignore
 
         # Output, with sources
         print(response)

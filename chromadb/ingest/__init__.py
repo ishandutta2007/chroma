@@ -1,24 +1,24 @@
 from abc import abstractmethod
 from typing import Callable, Optional, Sequence
 from chromadb.types import (
-    SubmitEmbeddingRecord,
-    EmbeddingRecord,
+    OperationRecord,
+    LogRecord,
     SeqId,
     Vector,
     ScalarEncoding,
 )
 from chromadb.config import Component
 from uuid import UUID
-import array
+import numpy as np
 
 
 def encode_vector(vector: Vector, encoding: ScalarEncoding) -> bytes:
     """Encode a vector into a byte array."""
 
     if encoding == ScalarEncoding.FLOAT32:
-        return array.array("f", vector).tobytes()
+        return np.array(vector, dtype=np.float32).tobytes()
     elif encoding == ScalarEncoding.INT32:
-        return array.array("i", vector).tobytes()
+        return np.array(vector, dtype=np.int32).tobytes()
     else:
         raise ValueError(f"Unsupported encoding: {encoding.value}")
 
@@ -27,9 +27,9 @@ def decode_vector(vector: bytes, encoding: ScalarEncoding) -> Vector:
     """Decode a byte array into a vector"""
 
     if encoding == ScalarEncoding.FLOAT32:
-        return array.array("f", vector).tolist()
+        return np.frombuffer(vector, dtype=np.float32)
     elif encoding == ScalarEncoding.INT32:
-        return array.array("i", vector).tolist()
+        return np.frombuffer(vector, dtype=np.float32)
     else:
         raise ValueError(f"Unsupported encoding: {encoding.value}")
 
@@ -38,25 +38,26 @@ class Producer(Component):
     """Interface for writing embeddings to an ingest stream"""
 
     @abstractmethod
-    def create_topic(self, topic_name: str) -> None:
+    def delete_log(self, collection_id: UUID) -> None:
         pass
 
     @abstractmethod
-    def delete_topic(self, topic_name: str) -> None:
+    def purge_log(self, collection_id: UUID) -> None:
+        """Truncates the log for the given collection, removing all seen records."""
         pass
 
     @abstractmethod
     def submit_embedding(
-        self, topic_name: str, embedding: SubmitEmbeddingRecord
+        self, collection_id: UUID, embedding: OperationRecord
     ) -> SeqId:
-        """Add an embedding record to the given topic. Returns the SeqID of the record."""
+        """Add an embedding record to the given collections log. Returns the SeqID of the record."""
         pass
 
     @abstractmethod
     def submit_embeddings(
-        self, topic_name: str, embeddings: Sequence[SubmitEmbeddingRecord]
+        self, collection_id: UUID, embeddings: Sequence[OperationRecord]
     ) -> Sequence[SeqId]:
-        """Add a batch of embedding records to the given topic. Returns the SeqIDs of
+        """Add a batch of embedding records to the given collections log. Returns the SeqIDs of
         the records. The returned SeqIDs will be in the same order as the given
         SubmitEmbeddingRecords. However, it is not guaranteed that the SeqIDs will be
         processed in the same order as the given SubmitEmbeddingRecords. If the number
@@ -71,7 +72,7 @@ class Producer(Component):
         pass
 
 
-ConsumerCallbackFn = Callable[[Sequence[EmbeddingRecord]], None]
+ConsumerCallbackFn = Callable[[Sequence[LogRecord]], None]
 
 
 class Consumer(Component):
@@ -80,14 +81,14 @@ class Consumer(Component):
     @abstractmethod
     def subscribe(
         self,
-        topic_name: str,
+        collection_id: UUID,
         consume_fn: ConsumerCallbackFn,
         start: Optional[SeqId] = None,
         end: Optional[SeqId] = None,
         id: Optional[UUID] = None,
     ) -> UUID:
-        """Register a function that will be called to recieve embeddings for a given
-        topic. The given function may be called any number of times, with any number of
+        """Register a function that will be called to receive embeddings for a given
+        collections log stream. The given function may be called any number of times, with any number of
         records, and may be called concurrently.
 
         Only records between start (exclusive) and end (inclusive) SeqIDs will be
@@ -117,13 +118,4 @@ class Consumer(Component):
     @abstractmethod
     def max_seqid(self) -> SeqId:
         """Return the maximum possible SeqID in this implementation."""
-        pass
-
-
-class CollectionAssignmentPolicy(Component):
-    """Interface for assigning collections to topics"""
-
-    @abstractmethod
-    def assign_collection(self, collection_id: UUID) -> str:
-        """Return the topic that should be used for the given collection"""
         pass

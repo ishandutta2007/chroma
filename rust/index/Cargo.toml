@@ -1,0 +1,46 @@
+[package]
+name = "chroma-index"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rand = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+arrow = { workspace = true }
+serde = { workspace = true }
+tantivy = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+roaring = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+tempfile = { workspace = true }
+
+chroma-error = { workspace = true }
+chroma-types = { workspace = true }
+chroma-blockstore = { workspace = true }
+chroma-cache = { workspace = true }
+chroma-config = { workspace = true }
+chroma-storage = { workspace = true }
+chroma-distance = { workspace = true }
+itertools = { workspace = true }
+hnswlib = { workspace = true }
+
+[dev-dependencies]
+rayon = { workspace = true }
+criterion = { workspace = true }
+chroma-benchmark = { workspace = true }
+proptest = { workspace = true }
+indicatif = "0.17.9"
+anyhow = "1.0.93"
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
+[[bench]]
+name = "full_text"
+harness = false

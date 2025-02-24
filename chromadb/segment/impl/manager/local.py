@@ -7,6 +7,14 @@ from chromadb.segment import (
     VectorReader,
     S,
 )
+import logging
+from chromadb.segment.impl.manager.cache.cache import (
+    SegmentLRUCache,
+    BasicCache,
+    SegmentCache,
+)
+import os
+
 from chromadb.config import System, get_class
 from chromadb.db.system import SysDB
 from overrides import override
@@ -21,16 +29,16 @@ from chromadb.telemetry.opentelemetry import (
 from chromadb.types import Collection, Operation, Segment, SegmentScope, Metadata
 from typing import Dict, Type, Sequence, Optional, cast
 from uuid import UUID, uuid4
-from collections import defaultdict
 import platform
 
 from chromadb.utils.lru_cache import LRUCache
+from chromadb.utils.directory import get_directory_size
+
 
 if platform.system() != "Windows":
     import resource
 elif platform.system() == "Windows":
     import ctypes
-
 
 SEGMENT_TYPE_IMPLS = {
     SegmentType.SQLITE: "chromadb.segment.impl.metadata.sqlite.SqliteMetadataSegment",
@@ -47,9 +55,6 @@ class LocalSegmentManager(SegmentManager):
     _vector_instances_file_handle_cache: LRUCache[
         UUID, PersistentLocalHnswSegment
     ]  # LRU cache to manage file handles across vector segment instances
-    _segment_cache: Dict[
-        UUID, Dict[SegmentScope, Segment]
-    ]  # Tracks which segments are loaded for a given collection
     _vector_segment_type: SegmentType = SegmentType.HNSW_LOCAL_MEMORY
     _lock: Lock
     _max_file_handles: int
@@ -59,8 +64,23 @@ class LocalSegmentManager(SegmentManager):
         self._sysdb = self.require(SysDB)
         self._system = system
         self._opentelemetry_client = system.require(OpenTelemetryClient)
+        self.logger = logging.getLogger(__name__)
         self._instances = {}
-        self._segment_cache = defaultdict(dict)
+        self.segment_cache: Dict[SegmentScope, SegmentCache] = {
+            SegmentScope.METADATA: BasicCache()  # type: ignore[no-untyped-call]
+        }
+        if (
+            system.settings.chroma_segment_cache_policy == "LRU"
+            and system.settings.chroma_memory_limit_bytes > 0
+        ):
+            self.segment_cache[SegmentScope.VECTOR] = SegmentLRUCache(
+                capacity=system.settings.chroma_memory_limit_bytes,
+                callback=lambda k, v: self.callback_cache_evict(v),
+                size_func=lambda k: self._get_segment_disk_size(k),
+            )
+        else:
+            self.segment_cache[SegmentScope.VECTOR] = BasicCache()  # type: ignore[no-untyped-call]
+
         self._lock = Lock()
 
         # TODO: prototyping with distributed segment for now, but this should be a configurable option
@@ -73,11 +93,23 @@ class LocalSegmentManager(SegmentManager):
                 self._max_file_handles = ctypes.windll.msvcrt._getmaxstdio()  # type: ignore
             segment_limit = (
                 self._max_file_handles
+                # This is integer division in Python 3, and not a comment.
                 // PersistentLocalHnswSegment.get_file_handle_count()
             )
             self._vector_instances_file_handle_cache = LRUCache(
                 segment_limit, callback=lambda _, v: v.close_persistent_index()
             )
+
+    @trace_method(
+        "LocalSegmentManager.callback_cache_evict",
+        OpenTelemetryGranularity.OPERATION_AND_SEGMENT,
+    )
+    def callback_cache_evict(self, segment: Segment) -> None:
+        collection_id = segment["collection"]
+        self.logger.info(f"LRU cache evict collection {collection_id}")
+        instance = self._instance(segment)
+        instance.stop()
+        del self._instances[segment["id"]]
 
     @override
     def start(self) -> None:
@@ -97,15 +129,17 @@ class LocalSegmentManager(SegmentManager):
             instance.stop()
             instance.reset_state()
         self._instances = {}
-        self._segment_cache = defaultdict(dict)
+        self.segment_cache[SegmentScope.VECTOR].reset()
         super().reset_state()
 
     @trace_method(
-        "LocalSegmentManager.create_segments",
+        "LocalSegmentManager.prepare_segments_for_new_collection",
         OpenTelemetryGranularity.OPERATION_AND_SEGMENT,
     )
     @override
-    def create_segments(self, collection: Collection) -> Sequence[Segment]:
+    def prepare_segments_for_new_collection(
+        self, collection: Collection
+    ) -> Sequence[Segment]:
         vector_segment = _segment(
             self._vector_segment_type, SegmentScope.VECTOR, collection
         )
@@ -126,18 +160,46 @@ class LocalSegmentManager(SegmentManager):
                 if segment["type"] == SegmentType.HNSW_LOCAL_PERSISTED.value:
                     instance = self.get_segment(collection_id, VectorReader)
                     instance.delete()
+                elif segment["type"] == SegmentType.SQLITE.value:
+                    instance = self.get_segment(collection_id, MetadataReader)  # type: ignore[assignment]
+                    instance.delete()
                 del self._instances[segment["id"]]
-            if collection_id in self._segment_cache:
-                if segment["scope"] in self._segment_cache[collection_id]:
-                    del self._segment_cache[collection_id][segment["scope"]]
-                del self._segment_cache[collection_id]
+            if segment["scope"] is SegmentScope.VECTOR:
+                self.segment_cache[SegmentScope.VECTOR].pop(collection_id)
+            if segment["scope"] is SegmentScope.METADATA:
+                self.segment_cache[SegmentScope.METADATA].pop(collection_id)
         return [s["id"] for s in segments]
+
+    def _get_segment_disk_size(self, collection_id: UUID) -> int:
+        segments = self._sysdb.get_segments(
+            collection=collection_id, scope=SegmentScope.VECTOR
+        )
+        if len(segments) == 0:
+            return 0
+        # With local segment manager (single server chroma), a collection always have one segment.
+        size = get_directory_size(
+            os.path.join(
+                self._system.settings.require("persist_directory"),
+                str(segments[0]["id"]),
+            )
+        )
+        return size
+
+    @trace_method(
+        "LocalSegmentManager._get_segment_sysdb",
+        OpenTelemetryGranularity.OPERATION_AND_SEGMENT,
+    )
+    def _get_segment_sysdb(self, collection_id: UUID, scope: SegmentScope) -> Segment:
+        segments = self._sysdb.get_segments(collection=collection_id, scope=scope)
+        known_types = set([k.value for k in SEGMENT_TYPE_IMPLS.keys()])
+        # Get the first segment of a known type
+        segment = next(filter(lambda s: s["type"] in known_types, segments))
+        return segment
 
     @trace_method(
         "LocalSegmentManager.get_segment",
         OpenTelemetryGranularity.OPERATION_AND_SEGMENT,
     )
-    @override
     def get_segment(self, collection_id: UUID, type: Type[S]) -> S:
         if type == MetadataReader:
             scope = SegmentScope.METADATA
@@ -146,17 +208,15 @@ class LocalSegmentManager(SegmentManager):
         else:
             raise ValueError(f"Invalid segment type: {type}")
 
-        if scope not in self._segment_cache[collection_id]:
-            segments = self._sysdb.get_segments(collection=collection_id, scope=scope)
-            known_types = set([k.value for k in SEGMENT_TYPE_IMPLS.keys()])
-            # Get the first segment of a known type
-            segment = next(filter(lambda s: s["type"] in known_types, segments))
-            self._segment_cache[collection_id][scope] = segment
+        segment = self.segment_cache[scope].get(collection_id)
+        if segment is None:
+            segment = self._get_segment_sysdb(collection_id, scope)
+            self.segment_cache[scope].set(collection_id, segment)
 
         # Instances must be atomically created, so we use a lock to ensure that only one thread
         # creates the instance.
         with self._lock:
-            instance = self._instance(self._segment_cache[collection_id][scope])
+            instance = self._instance(segment)
         return cast(S, instance)
 
     @trace_method(
@@ -194,7 +254,7 @@ class LocalSegmentManager(SegmentManager):
 def _segment(type: SegmentType, scope: SegmentScope, collection: Collection) -> Segment:
     """Create a metadata dict, propagating metadata correctly for the given segment type."""
     cls = get_class(SEGMENT_TYPE_IMPLS[type], SegmentImplementation)
-    collection_metadata = collection.get("metadata", None)
+    collection_metadata = collection.metadata
     metadata: Optional[Metadata] = None
     if collection_metadata:
         metadata = cls.propagate_collection_metadata(collection_metadata)
@@ -203,7 +263,7 @@ def _segment(type: SegmentType, scope: SegmentScope, collection: Collection) -> 
         id=uuid4(),
         type=type.value,
         scope=scope,
-        topic=collection["topic"],
-        collection=collection["id"],
+        collection=collection.id,
         metadata=metadata,
+        file_paths={},
     )

@@ -1,5 +1,3 @@
-version: '3.9'
-
 networks:
   test_net:
     driver: bridge
@@ -10,25 +8,21 @@ services:
       context: .
       dockerfile: Dockerfile
     volumes:
-      - ./:/chroma
-      - test_index_data:/index_data
-    command: uvicorn chromadb.app:app --workers 1 --host 0.0.0.0 --port 8000 --log-config chromadb/log_config.yml
+      - chroma-data:/chroma/chroma
+    command: "--workers 1 --host 0.0.0.0 --port 8000 --proxy-headers --log-config chromadb/log_config.yml --timeout-keep-alive 30"
     environment:
       - ANONYMIZED_TELEMETRY=False
       - ALLOW_RESET=True
-      - IS_PERSISTENT=TRUE
-      - CHROMA_SERVER_AUTH_CREDENTIALS_FILE=${CHROMA_SERVER_AUTH_CREDENTIALS_FILE}
-      - CHROMA_SERVER_AUTH_CREDENTIALS=${CHROMA_SERVER_AUTH_CREDENTIALS}
-      - CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER=${CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER}
-      - CHROMA_SERVER_AUTH_PROVIDER=${CHROMA_SERVER_AUTH_PROVIDER}
-      - CHROMA_SERVER_AUTH_TOKEN_TRANSPORT_HEADER=${CHROMA_SERVER_AUTH_TOKEN_TRANSPORT_HEADER}
+      - IS_PERSISTENT=True
+      - CHROMA_SERVER_AUTHN_CREDENTIALS_FILE=${CHROMA_SERVER_AUTHN_CREDENTIALS_FILE}
+      - CHROMA_SERVER_AUTHN_CREDENTIALS=${CHROMA_SERVER_AUTHN_CREDENTIALS}
+      - CHROMA_SERVER_AUTHN_PROVIDER=${CHROMA_SERVER_AUTHN_PROVIDER}
+      - CHROMA_AUTH_TOKEN_TRANSPORT_HEADER=${CHROMA_AUTH_TOKEN_TRANSPORT_HEADER}
     ports:
-      - ${CHROMA_PORT}:8000
+      - "${CHROMA_PORT:-8000}:8000"
     networks:
       - test_net
 
 volumes:
-  test_index_data:
-    driver: local
-  test_backups:
+  chroma-data:
     driver: local

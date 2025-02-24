@@ -1,6 +1,8 @@
+import asyncio
+import os
 from functools import wraps
 from enum import Enum
-from typing import Any, Callable, Dict, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Union, TypeVar
 
 from opentelemetry import trace
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
@@ -70,7 +72,7 @@ def otel_init(
     """Initializes module-level state for OpenTelemetry.
 
     Parameters match the environment variables which configure OTel as documented
-    at https://docs.trychroma.com/observability.
+    at https://docs.trychroma.com/deployment/observability.
     - otel_service_name: The name of the service for OTel tagging and aggregation.
     - otel_collection_endpoint: The endpoint to which OTel spans are sent
         (e.g. api.honeycomb.com).
@@ -98,6 +100,9 @@ def otel_init(
     granularity = otel_granularity
 
 
+T = TypeVar("T", bound=Callable)  # type: ignore[type-arg]
+
+
 def trace_method(
     trace_name: str,
     trace_granularity: OpenTelemetryGranularity,
@@ -116,21 +121,42 @@ def trace_method(
             ],
         ]
     ] = None,
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+) -> Callable[[T], T]:
     """A decorator that traces a method."""
 
-    def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
-        @wraps(f)
-        def wrapper(*args: Any, **kwargs: Dict[Any, Any]) -> Any:
-            global tracer, granularity
-            if trace_granularity < granularity:
-                return f(*args, **kwargs)
-            if not tracer:
-                return f(*args, **kwargs)
-            with tracer.start_as_current_span(trace_name, attributes=attributes):
-                return f(*args, **kwargs)
+    def decorator(f: T) -> T:
+        if asyncio.iscoroutinefunction(f):
 
-        return wrapper
+            @wraps(f)
+            async def async_wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+                global tracer, granularity
+                if trace_granularity < granularity:
+                    return await f(*args, **kwargs)
+                if not tracer:
+                    return await f(*args, **kwargs)
+                with tracer.start_as_current_span(trace_name, attributes=attributes):
+                    add_attributes_to_current_span(
+                        {"pod_name": os.environ.get("HOSTNAME")}
+                    )
+                    return await f(*args, **kwargs)
+
+            return async_wrapper  # type: ignore
+        else:
+
+            @wraps(f)
+            def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+                global tracer, granularity
+                if trace_granularity < granularity:
+                    return f(*args, **kwargs)
+                if not tracer:
+                    return f(*args, **kwargs)
+                with tracer.start_as_current_span(trace_name, attributes=attributes):
+                    add_attributes_to_current_span(
+                        {"pod_name": os.environ.get("HOSTNAME")}
+                    )
+                    return f(*args, **kwargs)
+
+            return wrapper  # type: ignore
 
     return decorator
 
@@ -147,6 +173,7 @@ def add_attributes_to_current_span(
             Sequence[bool],
             Sequence[float],
             Sequence[int],
+            None,
         ],
     ]
 ) -> None:
@@ -157,4 +184,4 @@ def add_attributes_to_current_span(
     if not tracer:
         return
     span = trace.get_current_span()
-    span.set_attributes(attributes)
+    span.set_attributes({k: v for k, v in attributes.items() if v is not None})
