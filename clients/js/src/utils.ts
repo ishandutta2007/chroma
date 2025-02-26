@@ -1,12 +1,23 @@
-import { Api } from "./generated";
-import Count200Response = Api.Count200Response;
+import { AdminClient } from "./AdminClient";
+import { ChromaClient } from "./ChromaClient";
+import { ChromaConnectionError } from "./Errors";
+import { IEmbeddingFunction } from "./embeddings/IEmbeddingFunction";
+import {
+  AddRecordsParams,
+  BaseRecordOperationParams,
+  CollectionParams,
+  Metadata,
+  MultiRecordOperationParams,
+  UpdateRecordsParams,
+} from "./types";
+import { Collection } from "./Collection";
 
 // a function to convert a non-Array object to an Array
-export function toArray<T>(obj: T | Array<T>): Array<T> {
+export function toArray<T>(obj: T | T[]): Array<T> {
   if (Array.isArray(obj)) {
     return obj;
   } else {
-    return [obj];
+    return [obj] as T[];
   }
 }
 
@@ -14,58 +25,19 @@ export function toArray<T>(obj: T | Array<T>): Array<T> {
 export function toArrayOfArrays<T>(
   obj: Array<Array<T>> | Array<T>
 ): Array<Array<T>> {
+  if (obj.length === 0) {
+    return [];
+  }
+
   if (Array.isArray(obj[0])) {
     return obj as Array<Array<T>>;
-  } else {
-    return [obj] as Array<Array<T>>;
   }
-}
 
-// we need to override constructors to make it work with jest
-// https://stackoverflow.com/questions/76007003/jest-tobeinstanceof-expected-constructor-array-received-constructor-array
-export function repack(value: unknown): any {
-  if (Boolean(value) && typeof value === "object") {
-    if (Array.isArray(value)) {
-      return new Array(...value);
-    } else {
-      return { ...value };
-    }
-  } else {
-    return value;
+  if (obj[0] && typeof (obj[0] as any)[Symbol.iterator] === 'function') {
+    return (obj as unknown as Array<Iterable<T>>).map(el => Array.from(el));
   }
-}
 
-export async function handleError(error: unknown) {
-  if (error instanceof Response) {
-    try {
-      const res = await error.json();
-      if ("error" in res) {
-        return { error: res.error };
-      }
-    } catch (e: unknown) {
-      return {
-        //@ts-ignore
-        error:
-          e && typeof e === "object" && "message" in e
-            ? e.message
-            : "unknown error",
-      };
-    }
-  }
-  return { error };
-}
-
-export async function handleSuccess(
-  response: Response | string | Count200Response
-) {
-  switch (true) {
-    case response instanceof Response:
-      return repack(await (response as Response).json());
-    case typeof response === "string":
-      return repack(response as string); // currently version is the only thing that return non-JSON
-    default:
-      return repack(response);
-  }
+  return [obj] as Array<Array<T>>;
 }
 
 /**
@@ -81,4 +53,125 @@ export async function handleSuccess(
  */
 export async function importOptionalModule(moduleName: string) {
   return Function(`return import("${moduleName}")`)();
+}
+
+export async function validateTenantDatabase(
+  adminClient: AdminClient,
+  tenant: string,
+  database: string,
+): Promise<void> {
+  try {
+    await adminClient.getTenant({ name: tenant });
+  } catch (error) {
+    if (error instanceof ChromaConnectionError) {
+      throw error;
+    }
+    throw new Error(
+      `Could not connect to tenant ${tenant}. Are you sure it exists? Underlying error:
+${error}`,
+    );
+  }
+
+  try {
+    await adminClient.getDatabase({ name: database, tenantName: tenant });
+  } catch (error) {
+    if (error instanceof ChromaConnectionError) {
+      throw error;
+    }
+    throw new Error(
+      `Could not connect to database ${database} for tenant ${tenant}. Are you sure it exists? Underlying error:
+${error}`,
+    );
+  }
+}
+
+export function isBrowser() {
+  return (
+    typeof window !== "undefined" && typeof window.document !== "undefined"
+  );
+}
+
+function arrayifyParams(
+  params: BaseRecordOperationParams,
+): MultiRecordOperationParams {
+  return {
+    ids: toArray(params.ids),
+    embeddings: params.embeddings
+      ? toArrayOfArrays(params.embeddings)
+      : undefined,
+    metadatas: params.metadatas
+      ? toArray<Metadata>(params.metadatas)
+      : undefined,
+    documents: params.documents ? toArray(params.documents) : undefined,
+  };
+}
+
+export async function prepareRecordRequest(
+  reqParams: AddRecordsParams | UpdateRecordsParams,
+  embeddingFunction: IEmbeddingFunction,
+  update?: true,
+): Promise<MultiRecordOperationParams> {
+  const { ids, embeddings, metadatas, documents } = arrayifyParams(reqParams);
+
+  if (!embeddings && !documents && !update) {
+    throw new Error("embeddings and documents cannot both be undefined");
+  }
+
+  const embeddingsArray = embeddings
+    ? embeddings
+    : documents
+    ? await embeddingFunction.generate(documents)
+    : undefined;
+
+  if (!embeddingsArray && !update) {
+    throw new Error("Failed to generate embeddings for your request.");
+  }
+
+  for (let i = 0; i < ids.length; i += 1) {
+    if (typeof ids[i] !== "string") {
+      throw new Error(
+        `Expected ids to be strings, found ${typeof ids[i]} at index ${i}`,
+      );
+    }
+  }
+
+  if (
+    (embeddingsArray !== undefined && ids.length !== embeddingsArray.length) ||
+    (metadatas !== undefined && ids.length !== metadatas.length) ||
+    (documents !== undefined && ids.length !== documents.length)
+  ) {
+    throw new Error(
+      "ids, embeddings, metadatas, and documents must all be the same length",
+    );
+  }
+
+  const uniqueIds = new Set(ids);
+  if (uniqueIds.size !== ids.length) {
+    const duplicateIds = ids.filter(
+      (item, index) => ids.indexOf(item) !== index,
+    );
+    throw new Error(
+      `ID's must be unique, found duplicates for: ${duplicateIds}`,
+    );
+  }
+
+  return {
+    ids,
+    metadatas,
+    documents,
+    embeddings: embeddingsArray,
+  };
+}
+
+export function wrapCollection(
+  api: ChromaClient,
+  collection: CollectionParams,
+): Collection {
+  return new Collection(
+    collection.name,
+    collection.id,
+    api,
+    collection.embeddingFunction,
+    collection.metadata,
+  );
 }

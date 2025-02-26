@@ -1,11 +1,9 @@
 {
-  "include": [
-    "src"
-  ],
+  "include": ["src"],
   "compilerOptions": {
     "declaration": true,
-    "declarationMap": true,
-    "module": "CommonJS",
+    "module": "ESNext",
+    "lib": ["ES2017", "DOM"],
     "outDir": "dist/main",
     "sourceMap": true,
     "target": "ES2017",

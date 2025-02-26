@@ -2,7 +2,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 import numpy as np
 import numpy.typing as npt
 from chromadb.types import (
-    EmbeddingRecord,
+    LogRecord,
     VectorEmbeddingRecord,
     VectorQuery,
     VectorQueryResult,
@@ -59,7 +59,7 @@ class BruteForceIndex:
         self.free_indices = list(range(self.size))
         self.vectors.fill(0)
 
-    def upsert(self, records: List[EmbeddingRecord]) -> None:
+    def upsert(self, records: List[LogRecord]) -> None:
         if len(records) + len(self) > self.size:
             raise Exception(
                 "Index with capacity {} and {} current entries cannot add {} records".format(
@@ -68,9 +68,9 @@ class BruteForceIndex:
             )
 
         for i, record in enumerate(records):
-            id = record["id"]
-            vector = record["embedding"]
-            self.id_to_seq_id[id] = record["seq_id"]
+            id = record["record"]["id"]
+            vector = record["record"]["embedding"]
+            self.id_to_seq_id[id] = record["log_offset"]
             if id in self.deleted_ids:
                 self.deleted_ids.remove(id)
 
@@ -86,16 +86,16 @@ class BruteForceIndex:
                 self.index_to_id[next_index] = id
                 self.vectors[next_index] = vector
 
-    def delete(self, records: List[EmbeddingRecord]) -> None:
+    def delete(self, records: List[LogRecord]) -> None:
         for record in records:
-            id = record["id"]
+            id = record["record"]["id"]
             if id in self.id_to_index:
                 index = self.id_to_index[id]
                 self.deleted_ids.add(id)
                 del self.id_to_index[id]
                 del self.index_to_id[index]
                 del self.id_to_seq_id[id]
-                self.vectors[index].fill(np.NaN)
+                self.vectors[index].fill(np.nan)
                 self.free_indices.append(index)
             else:
                 logger.warning(f"Delete of nonexisting embedding ID: {id}")
@@ -112,14 +112,13 @@ class BruteForceIndex:
         return [
             VectorEmbeddingRecord(
                 id=id,
-                embedding=self.vectors[self.id_to_index[id]].tolist(),
-                seq_id=self.id_to_seq_id[id],
+                embedding=self.vectors[self.id_to_index[id]],
             )
             for id in target_ids
         ]
 
     def query(self, query: VectorQuery) -> Sequence[Sequence[VectorQueryResult]]:
-        np_query = np.array(query["vectors"])
+        np_query = np.array(query["vectors"], dtype=np.float32)
         allowed_ids = (
             None if query["allowed_ids"] is None else set(query["allowed_ids"])
         )
@@ -129,7 +128,7 @@ class BruteForceIndex:
             np_query,
         )
 
-        indices = np.argsort(distances).tolist()
+        indices = np.argsort(distances)
         # Filter out deleted labels
         filtered_results = []
         for i, index_list in enumerate(indices):
@@ -145,8 +144,7 @@ class BruteForceIndex:
                             VectorQueryResult(
                                 id=id,
                                 distance=distances[i][j].item(),
-                                seq_id=self.id_to_seq_id[id],
-                                embedding=self.vectors[j].tolist(),
+                                embedding=self.vectors[j],
                             )
                         )
             filtered_results.append(curr_results)
