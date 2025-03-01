@@ -1,63 +1,35 @@
-from typing import TYPE_CHECKING, Optional, Tuple, cast, List
-from pydantic import BaseModel, PrivateAttr
+import inspect
+from typing import TYPE_CHECKING, Optional, Union
 
-from uuid import UUID
-import chromadb.utils.embedding_functions as ef
-
+from chromadb.api.models.CollectionCommon import CollectionCommon
 from chromadb.api.types import (
+    URI,
     CollectionMetadata,
     Embedding,
+    IncludeEnum,
+    PyEmbedding,
     Include,
     Metadata,
     Document,
+    Image,
     Where,
     IDs,
-    EmbeddingFunction,
     GetResult,
     QueryResult,
     ID,
     OneOrMany,
     WhereDocument,
-    maybe_cast_one_to_many,
-    validate_ids,
-    validate_include,
-    validate_metadata,
-    validate_metadatas,
-    validate_where,
-    validate_where_document,
-    validate_n_results,
-    validate_embeddings,
 )
+
 import logging
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from chromadb.api import ServerAPI
+    from chromadb.api import ServerAPI  # noqa: F401
 
 
-class Collection(BaseModel):
-    name: str
-    id: UUID
-    metadata: Optional[CollectionMetadata] = None
-    _client: "ServerAPI" = PrivateAttr()
-    _embedding_function: Optional[EmbeddingFunction] = PrivateAttr()
-
-    def __init__(
-        self,
-        client: "ServerAPI",
-        name: str,
-        id: UUID,
-        embedding_function: Optional[EmbeddingFunction] = ef.DefaultEmbeddingFunction(),
-        metadata: Optional[CollectionMetadata] = None,
-    ):
-        super().__init__(name=name, metadata=metadata, id=id)
-        self._client = client
-        self._embedding_function = embedding_function
-
-    def __repr__(self) -> str:
-        return f"Collection(name={self.name})"
-
+class Collection(CollectionCommon["ServerAPI"]):
     def count(self) -> int:
         """The total number of embeddings added to the database
 
@@ -65,21 +37,34 @@ class Collection(BaseModel):
             int: The total number of embeddings added to the database
 
         """
-        return self._client._count(collection_id=self.id)
+        return self._client._count(
+            collection_id=self.id,
+            tenant=self.tenant,
+            database=self.database,
+        )
 
     def add(
         self,
         ids: OneOrMany[ID],
-        embeddings: Optional[OneOrMany[Embedding]] = None,
+        embeddings: Optional[
+            Union[
+                OneOrMany[Embedding],
+                OneOrMany[PyEmbedding],
+            ]
+        ] = None,
         metadatas: Optional[OneOrMany[Metadata]] = None,
         documents: Optional[OneOrMany[Document]] = None,
+        images: Optional[OneOrMany[Image]] = None,
+        uris: Optional[OneOrMany[URI]] = None,
     ) -> None:
         """Add embeddings to the data store.
         Args:
             ids: The ids of the embeddings you wish to add
-            embeddings: The embeddings to add. If None, embeddings will be computed based on the documents using the embedding_function set for the Collection. Optional.
+            embeddings: The embeddings to add. If None, embeddings will be computed based on the documents or images using the embedding_function set for the Collection. Optional.
             metadatas: The metadata to associate with the embeddings. When querying, you can filter on this metadata. Optional.
             documents: The documents to associate with the embeddings. Optional.
+            images: The images to associate with the embeddings. Optional.
+            uris: The uris of the images to associate with the embeddings. Optional.
 
         Returns:
             None
@@ -93,11 +78,25 @@ class Collection(BaseModel):
 
         """
 
-        ids, embeddings, metadatas, documents = self._validate_embedding_set(
-            ids, embeddings, metadatas, documents
+        add_request = self._validate_and_prepare_add_request(
+            ids=ids,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            documents=documents,
+            images=images,
+            uris=uris,
         )
 
-        self._client._add(ids, self.id, embeddings, metadatas, documents)
+        self._client._add(
+            collection_id=self.id,
+            ids=add_request["ids"],
+            embeddings=add_request["embeddings"],
+            metadatas=add_request["metadatas"],
+            documents=add_request["documents"],
+            uris=add_request["uris"],
+            tenant=self.tenant,
+            database=self.database,
+        )
 
     def get(
         self,
@@ -106,14 +105,14 @@ class Collection(BaseModel):
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         where_document: Optional[WhereDocument] = None,
-        include: Include = ["metadatas", "documents"],
+        include: Include = [IncludeEnum.metadatas, IncludeEnum.documents],
     ) -> GetResult:
         """Get embeddings and their associate data from the data store. If no ids or where filter is provided returns
         all embeddings up to limit starting at offset.
 
         Args:
             ids: The ids of the embeddings to get. Optional.
-            where: A Where type dict used to filter results by. E.g. `{"$and": ["color" : "red", "price": {"$gte": 4.20}]}`. Optional.
+            where: A Where type dict used to filter results by. E.g. `{"$and": [{"color" : "red"}, {"price": {"$gte": 4.20}}]}`. Optional.
             limit: The number of documents to return. Optional.
             offset: The offset to start returning results from. Useful for paging results with limit. Optional.
             where_document: A WhereDocument type dict used to filter by the documents. E.g. `{$contains: {"text": "hello"}}`. Optional.
@@ -123,21 +122,27 @@ class Collection(BaseModel):
             GetResult: A GetResult object containing the results.
 
         """
-        where = validate_where(where) if where else None
-        where_document = (
-            validate_where_document(where_document) if where_document else None
-        )
-        ids = validate_ids(maybe_cast_one_to_many(ids)) if ids else None
-        include = validate_include(include, allow_distances=False)
-        return self._client._get(
-            self.id,
-            ids,
-            where,
-            None,
-            limit,
-            offset,
+        get_request = self._validate_and_prepare_get_request(
+            ids=ids,
+            where=where,
             where_document=where_document,
             include=include,
+        )
+
+        get_results = self._client._get(
+            collection_id=self.id,
+            ids=get_request["ids"],
+            where=get_request["where"],
+            where_document=get_request["where_document"],
+            include=get_request["include"],
+            sort=None,
+            limit=limit,
+            offset=offset,
+            tenant=self.tenant,
+            database=self.database,
+        )
+        return self._transform_get_response(
+            response=get_results, include=get_request["include"]
         )
 
     def peek(self, limit: int = 10) -> GetResult:
@@ -149,24 +154,44 @@ class Collection(BaseModel):
         Returns:
             GetResult: A GetResult object containing the results.
         """
-        return self._client._peek(self.id, limit)
+        return self._transform_peek_response(
+            self._client._peek(
+                collection_id=self.id,
+                n=limit,
+                tenant=self.tenant,
+                database=self.database,
+            )
+        )
 
     def query(
         self,
-        query_embeddings: Optional[OneOrMany[Embedding]] = None,
+        query_embeddings: Optional[
+            Union[
+                OneOrMany[Embedding],
+                OneOrMany[PyEmbedding],
+            ]
+        ] = None,
         query_texts: Optional[OneOrMany[Document]] = None,
+        query_images: Optional[OneOrMany[Image]] = None,
+        query_uris: Optional[OneOrMany[URI]] = None,
         n_results: int = 10,
         where: Optional[Where] = None,
         where_document: Optional[WhereDocument] = None,
-        include: Include = ["metadatas", "documents", "distances"],
+        include: Include = [
+            IncludeEnum.metadatas,
+            IncludeEnum.documents,
+            IncludeEnum.distances,
+        ],
     ) -> QueryResult:
         """Get the n_results nearest neighbor embeddings for provided query_embeddings or query_texts.
 
         Args:
             query_embeddings: The embeddings to get the closes neighbors of. Optional.
             query_texts: The document texts to get the closes neighbors of. Optional.
+            query_images: The images to get the closes neighbors of. Optional.
+            query_uris: The URIs to be used with data loader. Optional.
             n_results: The number of neighbors to return for each query_embedding or query_texts. Optional.
-            where: A Where type dict used to filter results by. E.g. `{"$and": ["color" : "red", "price": {"$gte": 4.20}]}`. Optional.
+            where: A Where type dict used to filter results by. E.g. `{"$and": [{"color" : "red"}, {"price": {"$gte": 4.20}}]}`. Optional.
             where_document: A WhereDocument type dict used to filter by the documents. E.g. `{$contains: {"text": "hello"}}`. Optional.
             include: A list of what to include in the results. Can contain `"embeddings"`, `"metadatas"`, `"documents"`, `"distances"`. Ids are always included. Defaults to `["metadatas", "documents", "distances"]`. Optional.
 
@@ -174,57 +199,37 @@ class Collection(BaseModel):
             QueryResult: A QueryResult object containing the results.
 
         Raises:
-            ValueError: If you don't provide either query_embeddings or query_texts
+            ValueError: If you don't provide either query_embeddings, query_texts, or query_images
             ValueError: If you provide both query_embeddings and query_texts
+            ValueError: If you provide both query_embeddings and query_images
+            ValueError: If you provide both query_texts and query_images
 
         """
-        where = validate_where(where) if where else None
-        where_document = (
-            validate_where_document(where_document) if where_document else None
-        )
-        query_embeddings = (
-            validate_embeddings(maybe_cast_one_to_many(query_embeddings))
-            if query_embeddings is not None
-            else None
-        )
-        query_texts = (
-            maybe_cast_one_to_many(query_texts) if query_texts is not None else None
-        )
-        include = validate_include(include, allow_distances=True)
-        n_results = validate_n_results(n_results)
 
-        # If neither query_embeddings nor query_texts are provided, or both are provided, raise an error
-        if (query_embeddings is None and query_texts is None) or (
-            query_embeddings is not None and query_texts is not None
-        ):
-            raise ValueError(
-                "You must provide either query embeddings or query texts, but not both"
-            )
-
-        # If query_embeddings are not provided, we need to compute them from the query_texts
-        if query_embeddings is None:
-            if self._embedding_function is None:
-                raise ValueError(
-                    "You must provide embeddings or a function to compute them"
-                )
-            # We know query texts is not None at this point, cast for the typechecker
-            query_embeddings = self._embedding_function(
-                cast(List[Document], query_texts)
-            )
-
-        if where is None:
-            where = {}
-
-        if where_document is None:
-            where_document = {}
-
-        return self._client._query(
-            collection_id=self.id,
+        query_request = self._validate_and_prepare_query_request(
             query_embeddings=query_embeddings,
+            query_texts=query_texts,
+            query_images=query_images,
+            query_uris=query_uris,
             n_results=n_results,
             where=where,
             where_document=where_document,
             include=include,
+        )
+
+        query_results = self._client._query(
+            collection_id=self.id,
+            query_embeddings=query_request["embeddings"],
+            n_results=query_request["n_results"],
+            where=query_request["where"],
+            where_document=query_request["where_document"],
+            include=query_request["include"],
+            tenant=self.tenant,
+            database=self.database,
+        )
+
+        return self._transform_query_response(
+            response=query_results, include=query_request["include"]
         )
 
     def modify(
@@ -239,46 +244,80 @@ class Collection(BaseModel):
         Returns:
             None
         """
-        if metadata is not None:
-            validate_metadata(metadata)
 
-        self._client._modify(id=self.id, new_name=name, new_metadata=metadata)
-        if name:
-            self.name = name
-        if metadata:
-            self.metadata = metadata
+        self._validate_modify_request(metadata)
+
+        # Note there is a race condition here where the metadata can be updated
+        # but another thread sees the cached local metadata.
+        # TODO: fixme
+        self._client._modify(
+            id=self.id,
+            new_name=name,
+            new_metadata=metadata,
+            tenant=self.tenant,
+            database=self.database,
+        )
+
+        self._update_model_after_modify_success(name, metadata)
 
     def update(
         self,
         ids: OneOrMany[ID],
-        embeddings: Optional[OneOrMany[Embedding]] = None,
+        embeddings: Optional[
+            Union[
+                OneOrMany[Embedding],
+                OneOrMany[PyEmbedding],
+            ]
+        ] = None,
         metadatas: Optional[OneOrMany[Metadata]] = None,
         documents: Optional[OneOrMany[Document]] = None,
+        images: Optional[OneOrMany[Image]] = None,
+        uris: Optional[OneOrMany[URI]] = None,
     ) -> None:
         """Update the embeddings, metadatas or documents for provided ids.
 
         Args:
             ids: The ids of the embeddings to update
-            embeddings: The embeddings to add. If None, embeddings will be computed based on the documents using the embedding_function set for the Collection. Optional.
+            embeddings: The embeddings to update. If None, embeddings will be computed based on the documents or images using the embedding_function set for the Collection. Optional.
             metadatas:  The metadata to associate with the embeddings. When querying, you can filter on this metadata. Optional.
             documents: The documents to associate with the embeddings. Optional.
-
+            images: The images to associate with the embeddings. Optional.
         Returns:
             None
         """
-
-        ids, embeddings, metadatas, documents = self._validate_embedding_set(
-            ids, embeddings, metadatas, documents, require_embeddings_or_documents=False
+        update_request = self._validate_and_prepare_update_request(
+            ids=ids,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            documents=documents,
+            images=images,
+            uris=uris,
         )
 
-        self._client._update(self.id, ids, embeddings, metadatas, documents)
+        self._client._update(
+            collection_id=self.id,
+            ids=update_request["ids"],
+            embeddings=update_request["embeddings"],
+            metadatas=update_request["metadatas"],
+            documents=update_request["documents"],
+            uris=update_request["uris"],
+            tenant=self.tenant,
+            database=self.database,
+        )
 
     def upsert(
         self,
         ids: OneOrMany[ID],
-        embeddings: Optional[OneOrMany[Embedding]] = None,
+        embeddings: Optional[
+            Union[
+                OneOrMany[Embedding],
+                OneOrMany[PyEmbedding],
+            ]
+        ] = None,
         metadatas: Optional[OneOrMany[Metadata]] = None,
         documents: Optional[OneOrMany[Document]] = None,
+        images: Optional[OneOrMany[Image]] = None,
+        uris: Optional[OneOrMany[URI]] = None,
     ) -> None:
         """Update the embeddings, metadatas or documents for provided ids, or create them if they don't exist.
 
@@ -291,17 +330,24 @@ class Collection(BaseModel):
         Returns:
             None
         """
-
-        ids, embeddings, metadatas, documents = self._validate_embedding_set(
-            ids, embeddings, metadatas, documents
-        )
-
-        self._client._upsert(
-            collection_id=self.id,
+        upsert_request = self._validate_and_prepare_upsert_request(
             ids=ids,
             embeddings=embeddings,
             metadatas=metadatas,
             documents=documents,
+            images=images,
+            uris=uris,
+        )
+
+        self._client._upsert(
+            collection_id=self.id,
+            ids=upsert_request["ids"],
+            embeddings=upsert_request["embeddings"],
+            metadatas=upsert_request["metadatas"],
+            documents=upsert_request["documents"],
+            uris=upsert_request["uris"],
+            tenant=self.tenant,
+            database=self.database,
         )
 
     def delete(
@@ -314,7 +360,7 @@ class Collection(BaseModel):
 
         Args:
             ids: The ids of the embeddings to delete
-            where: A Where type dict used to filter the delection by. E.g. `{"$and": ["color" : "red", "price": {"$gte": 4.20}]}`. Optional.
+            where: A Where type dict used to filter the delection by. E.g. `{"$and": [{"color" : "red"}, {"price": {"$gte": 4.20}]}}`. Optional.
             where_document: A WhereDocument type dict used to filter the deletion by the document content. E.g. `{$contains: {"text": "hello"}}`. Optional.
 
         Returns:
@@ -323,72 +369,54 @@ class Collection(BaseModel):
         Raises:
             ValueError: If you don't provide either ids, where, or where_document
         """
-        ids = validate_ids(maybe_cast_one_to_many(ids)) if ids else None
-        where = validate_where(where) if where else None
-        where_document = (
-            validate_where_document(where_document) if where_document else None
+        delete_request = self._validate_and_prepare_delete_request(
+            ids, where, where_document
         )
 
-        self._client._delete(self.id, ids, where, where_document)
-
-    def _validate_embedding_set(
-        self,
-        ids: OneOrMany[ID],
-        embeddings: Optional[OneOrMany[Embedding]],
-        metadatas: Optional[OneOrMany[Metadata]],
-        documents: Optional[OneOrMany[Document]],
-        require_embeddings_or_documents: bool = True,
-    ) -> Tuple[
-        IDs,
-        List[Embedding],
-        Optional[List[Metadata]],
-        Optional[List[Document]],
-    ]:
-        ids = validate_ids(maybe_cast_one_to_many(ids))
-        embeddings = (
-            validate_embeddings(maybe_cast_one_to_many(embeddings))
-            if embeddings is not None
-            else None
+        self._client._delete(
+            collection_id=self.id,
+            ids=delete_request["ids"],
+            where=delete_request["where"],
+            where_document=delete_request["where_document"],
+            tenant=self.tenant,
+            database=self.database,
         )
-        metadatas = (
-            validate_metadatas(maybe_cast_one_to_many(metadatas))
-            if metadatas is not None
-            else None
-        )
-        documents = maybe_cast_one_to_many(documents) if documents is not None else None
 
-        # Check that one of embeddings or documents is provided
-        if require_embeddings_or_documents:
-            if embeddings is None and documents is None:
-                raise ValueError(
-                    "You must provide either embeddings or documents, or both"
-                )
 
-        # Check that, if they're provided, the lengths of the arrays match the length of ids
-        if embeddings is not None and len(embeddings) != len(ids):
-            raise ValueError(
-                f"Number of embeddings {len(embeddings)} must match number of ids {len(ids)}"
+class CollectionName(str):
+    """
+    A string wrapper to supply users with indicative message about list_collections only
+    returning collection names, in lieu of Collection object.
+
+    When a user will try to access an attribute on a CollectionName string, the __getattribute__ method
+    of str is invoked first. If a valid str method or property is found, it will be used. Otherwise, the fallback
+    __getattr__ defined here is invoked next. It will error if the requested attribute is a Collection
+    method or property.
+
+    For example:
+    collection_name = client.list_collections()[0] # collection_name = "test"
+
+    collection_name.startsWith("t") # Evaluates to True.
+    # __getattribute__ is invoked first, selecting startsWith from str.
+
+    collection_name.add(ids=[...], documents=[...]) # Raises the error defined below
+    # __getattribute__ is invoked first, not finding a match in str.
+    # __getattr__ from this class is invoked and raises an error
+
+    """
+
+    def __getattr__(self, item):  # type: ignore
+        collection_attributes_and_methods = [
+            member
+            for member, _ in inspect.getmembers(Collection)
+            if not member.startswith("_")
+        ]
+
+        if item in collection_attributes_and_methods:
+            raise NotImplementedError(
+                f"In Chroma v0.6.0, list_collections only returns collection names. "
+                f"Use Client.get_collection({str(self)}) to access {item}. "
+                f"See https://docs.trychroma.com/deployment/migration for more information."
             )
-        if metadatas is not None and len(metadatas) != len(ids):
-            raise ValueError(
-                f"Number of metadatas {len(metadatas)} must match number of ids {len(ids)}"
-            )
-        if documents is not None and len(documents) != len(ids):
-            raise ValueError(
-                f"Number of documents {len(documents)} must match number of ids {len(ids)}"
-            )
 
-        # If document embeddings are not provided, we need to compute them
-        if embeddings is None and documents is not None:
-            if self._embedding_function is None:
-                raise ValueError(
-                    "You must provide embeddings or a function to compute them"
-                )
-            embeddings = self._embedding_function(documents)
-
-        # if embeddings is None:
-        #     raise ValueError(
-        #         "Something went wrong. Embeddings should be computed at this point"
-        #     )
-
-        return ids, embeddings, metadatas, documents  # type: ignore
+        raise AttributeError(f"'CollectionName' object has no attribute '{item}'")

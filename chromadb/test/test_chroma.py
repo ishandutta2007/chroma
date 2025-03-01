@@ -45,14 +45,18 @@ class GetDBTest(unittest.TestCase):
 
 class GetAPITest(unittest.TestCase):
     @patch("chromadb.api.segment.SegmentAPI", autospec=True)
-    @patch.dict(os.environ, {}, clear=True)
+    @patch.dict(
+        os.environ, {"CHROMA_API_IMPL": "chromadb.api.segment.SegmentAPI"}, clear=True
+    )
     def test_local(self, mock_api: Mock) -> None:
         client = chromadb.Client(chromadb.config.Settings(persist_directory="./foo"))
         assert mock_api.called
         client.clear_system_cache()
 
     @patch("chromadb.db.impl.sqlite.SqliteDB", autospec=True)
-    @patch.dict(os.environ, {}, clear=True)
+    @patch.dict(
+        os.environ, {"CHROMA_API_IMPL": "chromadb.api.segment.SegmentAPI"}, clear=True
+    )
     def test_local_db(self, mock_db: Mock) -> None:
         client = chromadb.Client(chromadb.config.Settings(persist_directory="./foo"))
         assert mock_db.called
@@ -66,7 +70,7 @@ class GetAPITest(unittest.TestCase):
                 chroma_api_impl="chromadb.api.fastapi.FastAPI",
                 persist_directory="./foo",
                 chroma_server_host="foo",
-                chroma_server_http_port="80",
+                chroma_server_http_port=80,
             )
         )
         assert mock.called
@@ -78,7 +82,7 @@ class GetAPITest(unittest.TestCase):
         settings = chromadb.config.Settings(
             chroma_api_impl="chromadb.api.fastapi.FastAPI",
             chroma_server_host="foo",
-            chroma_server_http_port="80",
+            chroma_server_http_port=80,
             chroma_server_headers={"foo": "bar"},
         )
         client = chromadb.Client(settings)
@@ -106,7 +110,7 @@ def test_legacy_values() -> None:
                 chroma_api_impl="chromadb.api.local.LocalAPI",
                 persist_directory="./foo",
                 chroma_server_host="foo",
-                chroma_server_http_port="80",
+                chroma_server_http_port=80,
             )
         )
         client.clear_system_cache()

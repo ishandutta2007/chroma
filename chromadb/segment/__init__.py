@@ -1,9 +1,10 @@
-from typing import Optional, Sequence, TypeVar, Type
+from typing import Optional, Sequence, TypeVar
 from abc import abstractmethod
 from chromadb.types import (
     Collection,
     MetadataEmbeddingRecord,
     Operation,
+    RequestVersionContext,
     VectorEmbeddingRecord,
     Where,
     WhereDocument,
@@ -23,6 +24,8 @@ class SegmentType(Enum):
     HNSW_LOCAL_MEMORY = "urn:chroma:segment/vector/hnsw-local-memory"
     HNSW_LOCAL_PERSISTED = "urn:chroma:segment/vector/hnsw-local-persisted"
     HNSW_DISTRIBUTED = "urn:chroma:segment/vector/hnsw-distributed"
+    BLOCKFILE_RECORD = "urn:chroma:segment/record/blockfile"
+    BLOCKFILE_METADATA = "urn:chroma:segment/metadata/blockfile"
 
 
 class SegmentImplementation(Component):
@@ -31,7 +34,7 @@ class SegmentImplementation(Component):
         pass
 
     @abstractmethod
-    def count(self) -> int:
+    def count(self, request_version_context: RequestVersionContext) -> int:
         """Get the number of embeddings in this segment"""
         pass
 
@@ -62,11 +65,13 @@ class MetadataReader(SegmentImplementation):
     @abstractmethod
     def get_metadata(
         self,
+        request_version_context: RequestVersionContext,
         where: Optional[Where] = None,
         where_document: Optional[WhereDocument] = None,
         ids: Optional[Sequence[str]] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        include_metadata: bool = True,
     ) -> Sequence[MetadataEmbeddingRecord]:
         """Query for embedding metadata."""
         pass
@@ -77,7 +82,9 @@ class VectorReader(SegmentImplementation):
 
     @abstractmethod
     def get_vectors(
-        self, ids: Optional[Sequence[str]] = None
+        self,
+        request_version_context: RequestVersionContext,
+        ids: Optional[Sequence[str]] = None,
     ) -> Sequence[VectorEmbeddingRecord]:
         """Get embeddings from the segment. If no IDs are provided, all embeddings are
         returned."""
@@ -97,7 +104,9 @@ class SegmentManager(Component):
     segments as required"""
 
     @abstractmethod
-    def create_segments(self, collection: Collection) -> Sequence[Segment]:
+    def prepare_segments_for_new_collection(
+        self, collection: Collection
+    ) -> Sequence[Segment]:
         """Return the segments required for a new collection. Returns only segment data,
         does not persist to the SysDB"""
         pass
@@ -106,18 +115,6 @@ class SegmentManager(Component):
     def delete_segments(self, collection_id: UUID) -> Sequence[UUID]:
         """Delete any local state for all the segments associated with a collection, and
         returns a sequence of their IDs. Does not update the SysDB."""
-        pass
-
-    # Future Note: To support time travel, add optional parameters to this method to
-    # retrieve Segment instances that are bounded to events from a specific range of
-    # time
-    @abstractmethod
-    def get_segment(self, collection_id: UUID, type: Type[S]) -> S:
-        """Return the segment that should be used for servicing queries to a collection.
-        Implementations should cache appropriately; clients are intended to call this
-        method repeatedly rather than storing the result (thereby giving this
-        implementation full control over which segment impls are in or out of memory at
-        a given time.)"""
         pass
 
     @abstractmethod
