@@ -126,7 +126,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ${{fromJson(inputs.python_versions)}}
-        platform: ["blacksmith-16vcpu-ubuntu-2204"]
+        platform: ["blacksmith-8vcpu-ubuntu-2204"]
         test-globs: ["chromadb/test/api",
                     "chromadb/test/api/test_collection.py",
                     "chromadb/test/api/test_limit_offset.py",
@@ -138,6 +138,7 @@ jobs:
                     "chromadb/test/property/test_collections_with_database_tenant.py",
                     "chromadb/test/property/test_collections_with_database_tenant_overwrite.py",
                     "chromadb/test/distributed/test_sanity.py",
+                    "chromadb/test/distributed/test_log_backpressure.py",
                     "chromadb/test/distributed/test_log_failover.py"]
     runs-on: ${{ matrix.platform }}
     # OIDC token auth for AWS
@@ -154,7 +155,8 @@ jobs:
         with:
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: ./.github/actions/tilt
+      - name: Start Tilt services
+        uses: ./.github/actions/tilt
       - name: Test
         run: bin/cluster-test.sh bash -c 'python -m pytest "${{ matrix.test-globs }}" --durations 10'
         shell: bash
